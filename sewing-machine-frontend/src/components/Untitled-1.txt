@@ -1,0 +1,10 @@
+[warning] APP_LOG: [info] Global error handlers initialized
+[warning] APP_LOG: [info] initializeApp
+[warning] APP_LOG: [info] Initializing token estimation system
+[log] debug Starting cleanup interval
+[warning] APP_LOG: [info] Token estimation system initialized
+[warning] APP_LOG: [info] migrateStorage: current storage config version: 14
+[warning] APP_LOG: [info] migrate done
+[warning] mcp bootstrap 0 servers, with license key: false
+[log] chatStore listSessionsMeta
+[log] chatStore getSessionById new
