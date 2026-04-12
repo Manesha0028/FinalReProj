@@ -18,6 +18,9 @@ class MachineData(BaseModel):
     usageHours: Dict[str, float]
     predictions: Dict[str, Any]
     lastPrediction: str
+    workingTimeSeconds: Optional[int] = 0
+    currentStatus: Optional[str] = "offline"
+    currentOnlineSince: Optional[str] = None
 
 class MachineResponse(MachineData):
     id: str
@@ -48,9 +51,19 @@ async def save_machine(
         machine_dict["createdAt"] = datetime.now().isoformat()
         machine_dict["createdBy"] = user.get("username")
         machine_dict["updatedAt"] = datetime.now().isoformat()
-        
+
         # Check if machine already exists
         existing = machines_collection.find_one({"machineId": machine_data.machineId})
+
+        # Preserve live-status fields if the machine already exists
+        if existing:
+            machine_dict["workingTimeSeconds"] = int(existing.get("workingTimeSeconds", 0) or 0)
+            machine_dict["currentStatus"] = existing.get("currentStatus", "offline")
+            machine_dict["currentOnlineSince"] = existing.get("currentOnlineSince")
+        else:
+            machine_dict["workingTimeSeconds"] = int(machine_dict.get("workingTimeSeconds", 0) or 0)
+            machine_dict["currentStatus"] = machine_dict.get("currentStatus") or "offline"
+            machine_dict["currentOnlineSince"] = machine_dict.get("currentOnlineSince")
         
         if existing:
             # Update existing machine

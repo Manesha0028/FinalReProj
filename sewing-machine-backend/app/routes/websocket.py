@@ -15,8 +15,187 @@ router = APIRouter()
 # Simple in-memory storage for device status
 device_status = {}
 
+# Count-based online window used by UI/logic.
+ONLINE_TIMEOUT_SECONDS = 5
+
 # Store connected WebSocket clients
 connected_clients: Dict[str, WebSocket] = {}
+
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def persist_offline_if_inactive(machine_id: str, machine: Optional[dict] = None) -> Optional[dict]:
+    """If machine timed out by inactivity, persist offline state at exact stop time (lastSeenAt)."""
+    db = get_database()
+    machines_collection = db["machines"]
+    machine_doc = machine or machines_collection.find_one({"machineId": machine_id})
+    if not machine_doc:
+        return None
+
+    if machine_doc.get("currentStatus") != "online":
+        return machine_doc
+
+    now = datetime.now()
+    now_iso = now.isoformat()
+    last_seen_at = parse_iso_datetime(machine_doc.get("lastSeenAt"))
+    online_since = parse_iso_datetime(machine_doc.get("currentOnlineSince"))
+
+    if not last_seen_at or not online_since:
+        return machine_doc
+
+    if (now - last_seen_at).total_seconds() <= ONLINE_TIMEOUT_SECONDS:
+        return machine_doc
+
+    persisted_seconds = int(machine_doc.get("workingTimeSeconds", 0) or 0)
+    elapsed_until_stop = max(0, int((last_seen_at - online_since).total_seconds()))
+    total_seconds = persisted_seconds + elapsed_until_stop
+
+    machines_collection.update_one(
+        {"machineId": machine_id},
+        {
+            "$set": {
+                "currentStatus": "offline",
+                "currentOnlineSince": None,
+                "workingTimeSeconds": total_seconds,
+                "lastSeenAt": last_seen_at.isoformat(),
+                "updatedAt": now_iso,
+            }
+        },
+    )
+
+    return machines_collection.find_one({"machineId": machine_id})
+
+
+def build_machine_status(machine_id: str, fallback_last_count: int = 0) -> dict:
+    """Read persisted status fields from MongoDB and normalize for websocket/API responses."""
+    db = get_database()
+    machines_collection = db["machines"]
+    machine = machines_collection.find_one({"machineId": machine_id}) or {}
+    if machine:
+        machine = persist_offline_if_inactive(machine_id, machine) or machine
+
+    persisted_seconds = int(machine.get("workingTimeSeconds", 0) or 0)
+    online_since = machine.get("currentOnlineSince")
+    current_status = machine.get("currentStatus", "offline")
+
+    # Keep last count in sync with DB if available, otherwise use fallback.
+    last_count = machine.get("last_count")
+    if last_count is None:
+        last_count = device_status.get(machine_id, {}).get("last_count", fallback_last_count)
+
+    return {
+        "machine_id": machine_id,
+        "current_status": current_status,
+        "online": current_status == "online",
+        "online_since": online_since,
+        "working_time_seconds": persisted_seconds,
+        "last_count": int(last_count or 0),
+        "last_seen": machine.get("lastSeenAt") or device_status.get(machine_id, {}).get("last_seen"),
+    }
+
+
+def mark_machine_online(machine_id: str, device_id: Optional[str], count_value: Optional[int] = None, rssi: Optional[int] = None) -> dict:
+    """Mark machine online and ensure running-time baseline is persisted."""
+    now = datetime.now()
+    now_iso = now.isoformat()
+    db = get_database()
+    machines_collection = db["machines"]
+
+    machine = machines_collection.find_one({"machineId": machine_id})
+    if machine:
+        machine = persist_offline_if_inactive(machine_id, machine) or machine
+
+    if machine:
+        update_fields = {
+            "currentStatus": "online",
+            "lastSeenAt": now_iso,
+            "updatedAt": now_iso,
+        }
+
+        # Start a new online session only if previously offline or without a valid session start.
+        if machine.get("currentStatus") != "online" or not machine.get("currentOnlineSince"):
+            update_fields["currentOnlineSince"] = now_iso
+
+        if count_value is not None:
+            update_fields["last_count"] = int(count_value)
+
+        machines_collection.update_one({"machineId": machine_id}, {"$set": update_fields})
+
+    status_snapshot = build_machine_status(machine_id, fallback_last_count=int(count_value or 0))
+
+    # Keep in-memory snapshot for quick websocket broadcasting.
+    device_status[machine_id] = {
+        "online": True,
+        "last_seen": now_iso,
+        "device_id": device_id,
+        "last_count": status_snapshot["last_count"],
+        "rssi": rssi,
+        "online_since": status_snapshot["online_since"],
+        "working_time_seconds": status_snapshot["working_time_seconds"],
+    }
+
+    return status_snapshot
+
+
+def mark_machine_offline(machine_id: str) -> dict:
+    """Close online session and persist accumulated working time when machine disconnects."""
+    now = datetime.now()
+    now_iso = now.isoformat()
+    db = get_database()
+    machines_collection = db["machines"]
+    machine = machines_collection.find_one({"machineId": machine_id}) or {}
+
+    persisted_seconds = int(machine.get("workingTimeSeconds", 0) or 0)
+    online_since = parse_iso_datetime(machine.get("currentOnlineSince"))
+
+    stop_time = parse_iso_datetime(machine.get("lastSeenAt")) or now
+    stop_time_iso = stop_time.isoformat()
+
+    elapsed = 0
+    if machine.get("currentStatus") == "online" and online_since:
+        elapsed = max(0, int((stop_time - online_since).total_seconds()))
+
+    total_seconds = persisted_seconds + elapsed
+
+    if machine:
+        machines_collection.update_one(
+            {"machineId": machine_id},
+            {
+                "$set": {
+                    "currentStatus": "offline",
+                    "currentOnlineSince": None,
+                    "workingTimeSeconds": total_seconds,
+                    "lastSeenAt": stop_time_iso,
+                    "updatedAt": now_iso,
+                }
+            },
+        )
+
+    previous = device_status.get(machine_id, {})
+    device_status[machine_id] = {
+        **previous,
+        "online": False,
+        "online_since": None,
+        "last_seen": stop_time_iso,
+        "working_time_seconds": total_seconds,
+    }
+
+    return {
+        "machine_id": machine_id,
+        "current_status": "offline",
+        "online": False,
+        "online_since": None,
+        "working_time_seconds": total_seconds,
+        "last_count": int(device_status[machine_id].get("last_count", 0) or 0),
+        "last_seen": stop_time_iso,
+    }
 
 async def broadcast_update(message: dict):
     """Broadcast a message to all connected clients"""
@@ -45,6 +224,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     device_id = None
     machine_id = None
+    is_device_connection = False
     
     try:
         while True:
@@ -72,23 +252,31 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                         last_count = last_reading["count"] if last_reading else 0
                         
-                        # Update device status
+                        persisted_status = build_machine_status(machine_id, fallback_last_count=last_count)
+
+                        # Keep cache in sync for UI readers.
                         device_status[machine_id] = {
-                            "online": True,
-                            "last_seen": datetime.now().isoformat(),
+                            "online": persisted_status["online"],
+                            "last_seen": persisted_status["last_seen"],
                             "device_id": device_id,
-                            "last_count": last_count
+                            "last_count": persisted_status["last_count"],
+                            "online_since": persisted_status["online_since"],
+                            "working_time_seconds": persisted_status["working_time_seconds"],
                         }
                         
                         # Send response
                         response = {
                             "type": "machine_status",
                             "machine_id": machine_id,
-                            "last_count": last_count,
-                            "status": "online"
+                            "last_count": persisted_status["last_count"],
+                            "status": persisted_status["current_status"],
+                            "online": persisted_status["online"],
+                            "online_since": persisted_status["online_since"],
+                            "working_time_seconds": persisted_status["working_time_seconds"],
+                            "last_seen": persisted_status["last_seen"],
                         }
                         await websocket.send_text(json.dumps(response))
-                        logger.info(f"📤 Sent machine {machine_id} status, last count: {last_count}")
+                        logger.info(f"📤 Sent machine {machine_id} status, last count: {persisted_status['last_count']}")
                         
                     elif msg_type == "count":
                         device_id = message.get("device_id")
@@ -96,6 +284,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         count_value = message.get("count")
                         
                         if count_value is not None:
+                            is_device_connection = True
                             logger.info(f"📊 Count from {machine_id}: {count_value}")
                             
                             # Save to database
@@ -109,10 +298,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             }
                             result = counter_collection.insert_one(counter_data)
                             
-                            # Update device status
-                            if machine_id in device_status:
-                                device_status[machine_id]["last_count"] = count_value
-                                device_status[machine_id]["last_seen"] = datetime.now().isoformat()
+                            status_snapshot = mark_machine_online(machine_id, device_id, count_value=count_value)
                             
                             # Broadcast update to all connected clients
                             update_message = {
@@ -120,7 +306,12 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "machine_id": machine_id,
                                 "count": count_value,
                                 "timestamp": datetime.now().isoformat(),
-                                "db_id": str(result.inserted_id)
+                                "db_id": str(result.inserted_id),
+                                "status": status_snapshot["current_status"],
+                                "online": status_snapshot["online"],
+                                "online_since": status_snapshot["online_since"],
+                                "working_time_seconds": status_snapshot["working_time_seconds"],
+                                "last_seen": status_snapshot["last_seen"],
                             }
                             await broadcast_update(update_message)
                             
@@ -137,16 +328,24 @@ async def websocket_endpoint(websocket: WebSocket):
                         machine_id = message.get("machine_id")
                         count_value = message.get("count")
                         rssi = message.get("rssi")
+
+                        is_device_connection = True
                         
                         logger.info(f"💓 Heartbeat from {machine_id}, count: {count_value}")
-                        
-                        # Update device status
+
+                        # Heartbeat should not change machine online/offline state.
+                        # Machine is considered online only when a new count update arrives.
+                        status_snapshot = build_machine_status(machine_id, fallback_last_count=int(count_value or 0))
+
+                        existing_state = device_status.get(machine_id, {})
                         device_status[machine_id] = {
-                            "online": True,
-                            "last_seen": datetime.now().isoformat(),
+                            **existing_state,
                             "device_id": device_id,
-                            "last_count": count_value,
-                            "rssi": rssi
+                            "rssi": rssi,
+                            "last_count": status_snapshot["last_count"],
+                            "online": status_snapshot["online"],
+                            "online_since": status_snapshot["online_since"],
+                            "working_time_seconds": status_snapshot["working_time_seconds"],
                         }
                         
                         # Broadcast heartbeat to all connected clients
@@ -155,7 +354,12 @@ async def websocket_endpoint(websocket: WebSocket):
                             "machine_id": machine_id,
                             "count": count_value,
                             "timestamp": datetime.now().isoformat(),
-                            "rssi": rssi
+                            "rssi": rssi,
+                            "status": status_snapshot["current_status"],
+                            "online": status_snapshot["online"],
+                            "online_since": status_snapshot["online_since"],
+                            "working_time_seconds": status_snapshot["working_time_seconds"],
+                            "last_seen": status_snapshot["last_seen"],
                         }
                         await broadcast_update(heartbeat_message)
                         
@@ -190,22 +394,70 @@ async def websocket_endpoint(websocket: WebSocket):
             del connected_clients[client_id]
             logger.info(f"👤 Client {client_id} disconnected. Total clients: {len(connected_clients)}")
         
-        # Update status to offline when disconnected
-        if machine_id and machine_id in device_status:
-            device_status[machine_id]["online"] = False
+        # Only device sockets should change machine presence on disconnect.
+        if machine_id and is_device_connection:
+            offline_snapshot = mark_machine_offline(machine_id)
             logger.info(f"📴 Machine {machine_id} marked as offline")
+            await broadcast_update({
+                "type": "machine_status",
+                "machine_id": machine_id,
+                "status": offline_snapshot["current_status"],
+                "online": offline_snapshot["online"],
+                "online_since": offline_snapshot["online_since"],
+                "working_time_seconds": offline_snapshot["working_time_seconds"],
+                "last_count": offline_snapshot["last_count"],
+                "last_seen": offline_snapshot["last_seen"],
+            })
 
 # ============== REST API ENDPOINTS ==============
 
 @router.get("/api/machines/status")
 async def get_all_machines_status():
     """Get status of all machines"""
-    return device_status
+    try:
+        db = get_database()
+        machines_collection = db["machines"]
+        machine_ids = [m.get("machineId") for m in machines_collection.find({}, {"machineId": 1, "_id": 0}) if m.get("machineId")]
+
+        status_map = {}
+        for machine_id in machine_ids:
+            status_map[machine_id] = build_machine_status(machine_id)
+
+        # Include ephemeral entries that might not be saved in machines collection yet.
+        for machine_id, state in device_status.items():
+            if machine_id not in status_map:
+                status_map[machine_id] = {
+                    "machine_id": machine_id,
+                    "current_status": "online" if state.get("online") else "offline",
+                    "online": bool(state.get("online")),
+                    "online_since": state.get("online_since"),
+                    "working_time_seconds": int(state.get("working_time_seconds", 0) or 0),
+                    "last_count": int(state.get("last_count", 0) or 0),
+                    "last_seen": state.get("last_seen"),
+                }
+
+        return status_map
+    except Exception as e:
+        logger.error(f"Error fetching machine status map: {e}")
+        return device_status
 
 @router.get("/api/machines/{machine_id}/status")
 async def get_single_machine_status(machine_id: str):
     """Get status of specific machine"""
-    return device_status.get(machine_id, {"online": False})
+    try:
+        return build_machine_status(machine_id)
+    except Exception as e:
+        logger.error(f"Error fetching machine status for {machine_id}: {e}")
+        fallback = device_status.get(machine_id, {})
+        return {
+            "machine_id": machine_id,
+            "current_status": "online" if fallback.get("online") else "offline",
+            "online": bool(fallback.get("online")),
+            "online_since": fallback.get("online_since"),
+            "working_time_seconds": int(fallback.get("working_time_seconds", 0) or 0),
+            "last_count": int(fallback.get("last_count", 0) or 0),
+            "last_seen": fallback.get("last_seen"),
+        }
 
 @router.get("/api/counter/history")
 async def get_counter_history(device_id: str = "0028", limit: int = 20):

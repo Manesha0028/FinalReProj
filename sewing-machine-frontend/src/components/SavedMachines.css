@@ -406,6 +406,14 @@
   font-weight: 500;
 }
 
+.status-online-text {
+  color: #2f855a !important;
+}
+
+.status-offline-text {
+  color: #c53030 !important;
+}
+
 .usage-hours-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

@@ -33,6 +33,13 @@ const SavedMachines = () => {
   const wsRef = useRef(null);
   const [statusUpdateTrigger, setStatusUpdateTrigger] = useState(0);
 
+  // Returns base seconds safely as a non-negative integer
+  const toSafeSeconds = (value) => {
+    const parsed = Number(value);
+    if (Number.isNaN(parsed) || parsed < 0) return 0;
+    return Math.floor(parsed);
+  };
+
   useEffect(() => {
     fetchSavedMachines();
     connectWebSocket();
@@ -74,41 +81,68 @@ const SavedMachines = () => {
           
           // Handle different message types
           if (data.type === 'machine_status') {
-            console.log(`🤖 Machine ${data.machine_id} status: last_count=${data.last_count}`);
-            setMachineStatus(prev => ({
-              ...prev,
-              [data.machine_id]: {
-                // Only update last_count, not last_seen (only count updates should set last_seen for online status)
-                last_count: data.last_count
-              }
-            }));
-          }
-          else if (data.type === 'heartbeat' || data.type === 'heartbeat_ack') {
-            console.log(`💓 Heartbeat from ${data.machine_id}, count: ${data.count}`);
+            console.log(`🤖 Machine ${data.machine_id} status: online=${data.online} wt=${data.working_time_seconds}`);
             setMachineStatus(prev => {
-              const updated = {
+              const prevStatus = prev[data.machine_id] || {};
+              const isOnline = data.online === true;
+              // Only set last_seen_ms if machine is actually online and we have a timestamp
+              const incomingLastSeenMs = (isOnline && data.last_seen)
+                ? new Date(data.last_seen).getTime()
+                : (isOnline ? prevStatus.last_seen_ms || null : null);
+              const incomingSessionStartMs = (isOnline && data.online_since)
+                ? new Date(data.online_since).getTime()
+                : (isOnline ? prevStatus.session_start_ms || null : null);
+              return {
                 ...prev,
                 [data.machine_id]: {
-                  ...prev[data.machine_id],
-                  // Don't update last_seen for heartbeats - only count updates determine online status
-                  rssi: data.rssi
-                  // Don't update last_count for heartbeats
+                  ...prevStatus,
+                  base_seconds: toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0),
+                  session_start_ms: incomingSessionStartMs,
+                  last_seen_ms: incomingLastSeenMs,
+                  last_count: data.last_count ?? prevStatus.last_count,
                 }
               };
-              console.log(`📊 Updated machine ${data.machine_id} heartbeat, rssi: ${data.rssi}`);
-              return updated;
             });
           }
-          else if (data.type === 'count_update') {
-            console.log(`🔢 Count update for ${data.machine_id}: ${data.count}`);
+          else if (data.type === 'heartbeat' || data.type === 'heartbeat_ack') {
+            // Heartbeat only updates signal strength – never changes online/time state
             setMachineStatus(prev => ({
               ...prev,
               [data.machine_id]: {
-                // Don't set online: true here, isMachineOnline will determine based on time
-                last_count: data.count,
-                last_seen: data.timestamp || new Date().toISOString()
+                ...(prev[data.machine_id] || {}),
+                rssi: data.rssi,
               }
             }));
+          }
+          else if (data.type === 'count_update') {
+            console.log(`🔢 Count update for ${data.machine_id}: ${data.count} wt=${data.working_time_seconds}`);
+            setMachineStatus(prev => {
+              const prevStatus = prev[data.machine_id] || {};
+              const nowMs = Date.now();
+              // Was the machine considered online just before this count?
+              const wasOnline = !!(prevStatus.last_seen_ms && (nowMs - prevStatus.last_seen_ms) <= 5000);
+              // Trust the count timestamp from server; fall back to now
+              const newLastSeenMs = data.last_seen
+                ? new Date(data.last_seen).getTime()
+                : (data.timestamp ? new Date(data.timestamp).getTime() : nowMs);
+              // If was online, keep existing session start. If reconnecting, use backend's online_since.
+              const newSessionStartMs = wasOnline
+                ? (prevStatus.session_start_ms || newLastSeenMs)
+                : (data.online_since
+                    ? new Date(data.online_since).getTime()
+                    : newLastSeenMs);
+              return {
+                ...prev,
+                [data.machine_id]: {
+                  ...prevStatus,
+                  // base_seconds = accumulated total BEFORE current session (backend is source of truth)
+                  base_seconds: toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0),
+                  session_start_ms: newSessionStartMs,
+                  last_seen_ms: newLastSeenMs,
+                  last_count: data.count,
+                }
+              };
+            });
             
             // Add to history
             setCounterHistory(prev => {
@@ -134,11 +168,24 @@ const SavedMachines = () => {
       ws.onclose = () => {
         console.log('❌ WebSocket disconnected');
         setWsConnected(false);
-        // Mark all machines as offline
+        // Freeze all machine timers at last_seen when WS disconnects
         setMachineStatus(prev => {
           const updated = { ...prev };
+          const nowMs = Date.now();
           Object.keys(updated).forEach(id => {
-            updated[id] = { ...updated[id], online: false };
+            const s = updated[id] || {};
+            if (s.last_seen_ms && s.session_start_ms) {
+              const wasOnline = (nowMs - s.last_seen_ms) <= 5000;
+              if (wasOnline) {
+                // Freeze: add elapsed-until-last-seen to base, clear session
+                const elapsed = Math.max(0, Math.floor((s.last_seen_ms - s.session_start_ms) / 1000));
+                updated[id] = {
+                  ...s,
+                  base_seconds: toSafeSeconds(s.base_seconds || 0) + elapsed,
+                  session_start_ms: null,
+                };
+              }
+            }
           });
           return updated;
         });
@@ -164,9 +211,11 @@ const SavedMachines = () => {
         // Initialize status for all machines
         const initialStatus = {};
         response.data.machines.forEach(m => {
-          initialStatus[m.machineId] = { 
-            online: false,
-            last_count: m.last_count || 0 
+          initialStatus[m.machineId] = {
+            base_seconds: toSafeSeconds(m.workingTimeSeconds || 0),
+            session_start_ms: null,
+            last_seen_ms: null,
+            last_count: m.last_count || 0,
           };
         });
         setMachineStatus(initialStatus);
@@ -190,7 +239,12 @@ const SavedMachines = () => {
         setMachines(localMachines);
         const initialStatus = {};
         localMachines.forEach(m => {
-          initialStatus[m.machineId] = { online: false, last_count: m.last_count || 0 };
+          initialStatus[m.machineId] = {
+            base_seconds: toSafeSeconds(m.workingTimeSeconds || 0),
+            session_start_ms: null,
+            last_seen_ms: null,
+            last_count: m.last_count || 0,
+          };
         });
         setMachineStatus(initialStatus);
         
@@ -512,15 +566,36 @@ const SavedMachines = () => {
     }
   };
 
+  // Online = received a count within the last 5 seconds
   const isMachineOnline = (machineId) => {
     const status = machineStatus[machineId];
-    if (!status || !status.last_seen) return false;
-    
-    const lastSeen = new Date(status.last_seen);
-    const now = new Date();
-    const diffSeconds = (now - lastSeen) / 1000;
-    
-    return diffSeconds <= 5; // Online if last seen within 5 seconds
+    if (!status || !status.last_seen_ms) return false;
+    return (Date.now() - status.last_seen_ms) <= 5000;
+  };
+
+  const formatSecondsToHms = (secondsValue) => {
+    const totalSeconds = Math.max(0, Math.floor(Number(secondsValue) || 0));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  };
+
+  const getCurrentWorkingSeconds = (machine) => {
+    if (!machine || !machine.machineId) return 0;
+    const status = machineStatus[machine.machineId] || {};
+    // base_seconds = accumulated total EXCLUDING current session (set by backend on each reconnect)
+    const base = toSafeSeconds(status.base_seconds ?? machine.workingTimeSeconds ?? 0);
+    const { session_start_ms: sessionStart, last_seen_ms: lastSeen } = status;
+    if (!lastSeen || !sessionStart) return base;
+    const isOnline = (Date.now() - lastSeen) <= 5000;
+    if (isOnline) {
+      // Live: count from session start to now
+      return base + Math.max(0, Math.floor((Date.now() - sessionStart) / 1000));
+    } else {
+      // Frozen: count from session start to last received count (never goes up while offline)
+      return base + Math.max(0, Math.floor((lastSeen - sessionStart) / 1000));
+    }
   };
 
   // Get status for machine 0028
@@ -830,6 +905,16 @@ const SavedMachines = () => {
                 <div className="detail-item">
                   <label>Last Prediction:</label>
                   <span>{new Date(selectedMachine.lastPrediction || selectedMachine.timestamp).toLocaleString()}</span>
+                </div>
+                <div className="detail-item">
+                  <label>Machine Status:</label>
+                  <span className={isMachineOnline(selectedMachine.machineId) ? 'status-online-text' : 'status-offline-text'}>
+                    {isMachineOnline(selectedMachine.machineId) ? 'Online' : 'Offline'}
+                  </span>
+                </div>
+                <div className="detail-item">
+                  <label>Machine Working Time:</label>
+                  <span>{formatSecondsToHms(getCurrentWorkingSeconds(selectedMachine))}</span>
                 </div>
               </div>
             </div>
