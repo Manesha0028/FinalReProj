@@ -438,12 +438,13 @@ const SavedMachines = () => {
 
   const formatHoursToHourMinute = (hoursValue) => {
     const numericHours = Number(hoursValue);
-    if (Number.isNaN(numericHours) || numericHours < 0) return '0h 00m';
+    if (Number.isNaN(numericHours) || numericHours < 0) return '0h 00m 00s';
 
-    const totalMinutes = Math.round(numericHours * 60);
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+    const totalSeconds = Math.round(numericHours * 3600);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
   };
 
   const extractRemainingHours = (predictionText) => {
