@@ -436,6 +436,30 @@ const SavedMachines = () => {
     setError('');
   };
 
+  const formatHoursToHourMinute = (hoursValue) => {
+    const numericHours = Number(hoursValue);
+    if (Number.isNaN(numericHours) || numericHours < 0) return '0h 00m';
+
+    const totalMinutes = Math.round(numericHours * 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+  };
+
+  const extractRemainingHours = (predictionText) => {
+    if (typeof predictionText !== 'string') return 0;
+    const match = predictionText.match(/(\d+(?:\.\d+)?)\s*hours?\s*remaining/i);
+    return match ? Number(match[1]) : 0;
+  };
+
+  const formatPredictionWithHourMinute = (predictionText) => {
+    if (typeof predictionText !== 'string') return 'No prediction';
+
+    return predictionText.replace(/(\d+(?:\.\d+)?)\s*hours?\s*remaining/gi, (_, hours) => {
+      return `${formatHoursToHourMinute(hours)} remaining`;
+    });
+  };
+
   const calculateOverallHealth = (predictions) => {
     if (!predictions) return 0;
     
@@ -445,7 +469,7 @@ const SavedMachines = () => {
     Object.entries(predictions).forEach(([component, message]) => {
       if (!['machineId', 'brandName', 'machineType', 'fabricType', 'manufacturingYear', 'usageHours', 'timestamp'].includes(component)) {
         if (typeof message === 'string' && message.includes('hours remaining')) {
-          const hours = parseInt(message.split(' ')[1]);
+          const hours = extractRemainingHours(message);
           total += Math.min(100, (hours / 500) * 100);
           count++;
         } else if (typeof message === 'string' && message.includes('Maintenance Required')) {
@@ -825,10 +849,10 @@ const SavedMachines = () => {
               <div className="components-grid">
                 {selectedMachine.usageHours && Object.entries(selectedMachine.usageHours).map(([component, hours]) => {
                   const prediction = selectedMachine.predictions?.[component] || 'No prediction';
+                  const formattedPrediction = formatPredictionWithHourMinute(prediction);
                   const isSelected = selectedComponent === component;
                   const isCritical = prediction.includes('Maintenance Required');
-                  const hoursRemaining = prediction.includes('hours remaining') ?
-                    parseInt(prediction.split(' ')[1]) : 0;
+                  const hoursRemaining = extractRemainingHours(prediction);
 
                   return (
                     <div
@@ -886,12 +910,12 @@ const SavedMachines = () => {
                           <div className="component-details">
                             <div className="usage-info">
                               <span className="info-label">Used:</span>
-                              <span className="info-value">{hours} hrs</span>
+                              <span className="info-value">{formatHoursToHourMinute(hours)}</span>
                             </div>
                             <div className="prediction-info">
                               <span className="info-label">Prediction:</span>
                               <span className={`info-value ${isCritical ? 'critical-text' : ''}`}>
-                                {prediction}
+                                {formattedPrediction}
                               </span>
                             </div>
                             {!isCritical && hoursRemaining > 0 && (
@@ -905,7 +929,7 @@ const SavedMachines = () => {
                                     }}
                                   ></div>
                                 </div>
-                                <span className="rul-text">{hoursRemaining} hrs RUL</span>
+                                <span className="rul-text">{formatHoursToHourMinute(hoursRemaining)} RUL</span>
                               </div>
                             )}
                           </div>
