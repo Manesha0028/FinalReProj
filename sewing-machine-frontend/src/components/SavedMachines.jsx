@@ -31,6 +31,10 @@ const SavedMachines = () => {
   const [loadingHistory, setLoadingHistory] = useState(false);
   
   const wsRef = useRef(null);
+  const persistInFlightRef = useRef(false);
+  const machinesRef = useRef([]);
+  const machineStatusRef = useRef({});
+  const selectedMachineRef = useRef(null);
   const [statusUpdateTrigger, setStatusUpdateTrigger] = useState(0);
 
   // Returns base seconds safely as a non-negative integer
@@ -38,6 +42,21 @@ const SavedMachines = () => {
     const parsed = Number(value);
     if (Number.isNaN(parsed) || parsed < 0) return 0;
     return Math.floor(parsed);
+  };
+
+  const calculateCurrentFromSnapshot = (status, atMs = Date.now()) => {
+    const base = toSafeSeconds(status?.base_seconds ?? 0);
+    const sessionStart = status?.session_start_ms;
+    const lastSeen = status?.last_seen_ms;
+
+    if (!sessionStart || !lastSeen) return base;
+
+    const isOnline = (atMs - lastSeen) <= 5000;
+    if (isOnline) {
+      return base + Math.max(0, Math.floor((atMs - sessionStart) / 1000));
+    }
+
+    return base + Math.max(0, Math.floor((lastSeen - sessionStart) / 1000));
   };
 
   useEffect(() => {
@@ -54,6 +73,18 @@ const SavedMachines = () => {
   useEffect(() => {
     filterAndSortMachines();
   }, [machines, searchTerm, sortConfig, fabricFilter, yearFilter, statusUpdateTrigger]);
+
+  useEffect(() => {
+    machinesRef.current = machines;
+  }, [machines]);
+
+  useEffect(() => {
+    machineStatusRef.current = machineStatus;
+  }, [machineStatus]);
+
+  useEffect(() => {
+    selectedMachineRef.current = selectedMachine;
+  }, [selectedMachine]);
 
   // Periodic status update to check online/offline based on time
   useEffect(() => {
@@ -85,18 +116,23 @@ const SavedMachines = () => {
             setMachineStatus(prev => {
               const prevStatus = prev[data.machine_id] || {};
               const isOnline = data.online === true;
+              const nowMs = Date.now();
+              const previousCurrentSeconds = calculateCurrentFromSnapshot(prevStatus, nowMs);
+              const incomingBaseSeconds = toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0);
               // Only set last_seen_ms if machine is actually online and we have a timestamp
               const incomingLastSeenMs = (isOnline && data.last_seen)
                 ? new Date(data.last_seen).getTime()
-                : (isOnline ? prevStatus.last_seen_ms || null : null);
-              const incomingSessionStartMs = (isOnline && data.online_since)
-                ? new Date(data.online_since).getTime()
-                : (isOnline ? prevStatus.session_start_ms || null : null);
+                : (isOnline ? (prevStatus.last_seen_ms || nowMs) : null);
+              // Never move timer backward when a snapshot arrives.
+              const normalizedBaseSeconds = Math.max(incomingBaseSeconds, previousCurrentSeconds);
+              const incomingSessionStartMs = isOnline
+                ? (incomingLastSeenMs || nowMs)
+                : null;
               return {
                 ...prev,
                 [data.machine_id]: {
                   ...prevStatus,
-                  base_seconds: toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0),
+                  base_seconds: normalizedBaseSeconds,
                   session_start_ms: incomingSessionStartMs,
                   last_seen_ms: incomingLastSeenMs,
                   last_count: data.last_count ?? prevStatus.last_count,
@@ -119,24 +155,21 @@ const SavedMachines = () => {
             setMachineStatus(prev => {
               const prevStatus = prev[data.machine_id] || {};
               const nowMs = Date.now();
-              // Was the machine considered online just before this count?
-              const wasOnline = !!(prevStatus.last_seen_ms && (nowMs - prevStatus.last_seen_ms) <= 5000);
+              const previousCurrentSeconds = calculateCurrentFromSnapshot(prevStatus, nowMs);
+              const incomingBaseSeconds = toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0);
               // Trust the count timestamp from server; fall back to now
               const newLastSeenMs = data.last_seen
                 ? new Date(data.last_seen).getTime()
                 : (data.timestamp ? new Date(data.timestamp).getTime() : nowMs);
-              // If was online, keep existing session start. If reconnecting, use backend's online_since.
-              const newSessionStartMs = wasOnline
-                ? (prevStatus.session_start_ms || newLastSeenMs)
-                : (data.online_since
-                    ? new Date(data.online_since).getTime()
-                    : newLastSeenMs);
+              // Never allow baseline to drop below current locally calculated runtime.
+              const normalizedBaseSeconds = Math.max(incomingBaseSeconds, previousCurrentSeconds);
+              // Reset session start to this snapshot time so base_seconds acts as true baseline.
+              const newSessionStartMs = newLastSeenMs;
               return {
                 ...prev,
                 [data.machine_id]: {
                   ...prevStatus,
-                  // base_seconds = accumulated total BEFORE current session (backend is source of truth)
-                  base_seconds: toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0),
+                  base_seconds: normalizedBaseSeconds,
                   session_start_ms: newSessionStartMs,
                   last_seen_ms: newLastSeenMs,
                   last_count: data.count,
@@ -477,7 +510,8 @@ const SavedMachines = () => {
 
   const startRepredict = (component) => {
     setSelectedComponent(component);
-    setNewUsageHours(selectedMachine.usageHours[component] || '');
+    const adjustedHours = getAdjustedUsageHours(selectedMachine, selectedMachine.usageHours[component]);
+    setNewUsageHours(String(Math.round(adjustedHours * 100) / 100));
     setRepredictMode(true);
     setRepredictResult(null);
   };
@@ -568,7 +602,7 @@ const SavedMachines = () => {
 
   // Online = received a count within the last 5 seconds
   const isMachineOnline = (machineId) => {
-    const status = machineStatus[machineId];
+    const status = machineStatusRef.current[machineId] || machineStatus[machineId];
     if (!status || !status.last_seen_ms) return false;
     return (Date.now() - status.last_seen_ms) <= 5000;
   };
@@ -583,7 +617,7 @@ const SavedMachines = () => {
 
   const getCurrentWorkingSeconds = (machine) => {
     if (!machine || !machine.machineId) return 0;
-    const status = machineStatus[machine.machineId] || {};
+    const status = machineStatusRef.current[machine.machineId] || {};
     // base_seconds = accumulated total EXCLUDING current session (set by backend on each reconnect)
     const base = toSafeSeconds(status.base_seconds ?? machine.workingTimeSeconds ?? 0);
     const { session_start_ms: sessionStart, last_seen_ms: lastSeen } = status;
@@ -597,6 +631,113 @@ const SavedMachines = () => {
       return base + Math.max(0, Math.floor((lastSeen - sessionStart) / 1000));
     }
   };
+
+  const getElapsedWorkingHours = (machine) => {
+    if (!machine) return 0;
+    const baseSeconds = toSafeSeconds(machine.workingTimeSeconds || 0);
+    const currentSeconds = getCurrentWorkingSeconds(machine);
+    const elapsedSeconds = Math.max(0, currentSeconds - baseSeconds);
+    return elapsedSeconds / 3600;
+  };
+
+  const getAdjustedUsageHours = (machine, usageHours) => {
+    const baseUsageHours = Number(usageHours);
+    const safeBaseUsage = Number.isNaN(baseUsageHours) || baseUsageHours < 0 ? 0 : baseUsageHours;
+    return safeBaseUsage + getElapsedWorkingHours(machine);
+  };
+
+  const getAdjustedPredictionText = (machine, predictionText) => {
+    if (typeof predictionText !== 'string') return 'No prediction';
+
+    const elapsedHours = getElapsedWorkingHours(machine);
+
+    return predictionText.replace(/(\d+(?:\.\d+)?)\s*hours?\s*remaining/gi, (_, hours) => {
+      const remaining = Math.max(0, Number(hours) - elapsedHours);
+      if (remaining <= 0) return 'Maintenance Required';
+      return `${remaining.toFixed(6)} hours remaining`;
+    });
+  };
+
+  const getLiveAdjustedMachine = (machine) => {
+    if (!machine || !machine.machineId || !machine.usageHours) return null;
+
+    const currentWorkingSeconds = getCurrentWorkingSeconds(machine);
+    const baseWorkingSeconds = toSafeSeconds(machine.workingTimeSeconds || 0);
+
+    if (currentWorkingSeconds <= baseWorkingSeconds) {
+      return null;
+    }
+
+    const adjustedUsageHours = {};
+    Object.entries(machine.usageHours).forEach(([component, hours]) => {
+      adjustedUsageHours[component] = getAdjustedUsageHours(machine, hours);
+    });
+
+    const adjustedPredictions = { ...(machine.predictions || {}) };
+    Object.keys(adjustedUsageHours).forEach((component) => {
+      const currentPrediction = machine.predictions?.[component];
+      if (typeof currentPrediction === 'string') {
+        adjustedPredictions[component] = getAdjustedPredictionText(machine, currentPrediction);
+      }
+    });
+
+    return {
+      ...machine,
+      usageHours: adjustedUsageHours,
+      predictions: adjustedPredictions,
+      workingTimeSeconds: currentWorkingSeconds,
+      lastPrediction: new Date().toISOString(),
+    };
+  };
+
+  const persistLiveMachineAdjustments = async () => {
+    if (persistInFlightRef.current) return;
+
+    const currentMachines = machinesRef.current;
+    const onlineMachines = currentMachines.filter((machine) => isMachineOnline(machine.machineId));
+    if (onlineMachines.length === 0) return;
+
+    const updatedMachines = onlineMachines
+      .map((machine) => getLiveAdjustedMachine(machine))
+      .filter((machine) => machine !== null);
+
+    if (updatedMachines.length === 0) return;
+
+    persistInFlightRef.current = true;
+    try {
+      await Promise.all(updatedMachines.map((machine) => api.post('/api/machines', machine)));
+
+      setMachines((prev) => prev.map((machine) => {
+        const updated = updatedMachines.find((m) => m.machineId === machine.machineId);
+        return updated || machine;
+      }));
+
+      setSelectedMachine((prev) => {
+        if (!prev) return prev;
+        const updated = updatedMachines.find((m) => m.machineId === prev.machineId);
+        return updated || prev;
+      });
+
+      const localSaved = JSON.parse(localStorage.getItem('savedMachines') || '[]');
+      const updatedLocal = localSaved.map((machine) => {
+        const updated = updatedMachines.find((m) => m.machineId === machine.machineId);
+        return updated || machine;
+      });
+      localStorage.setItem('savedMachines', JSON.stringify(updatedLocal));
+    } catch (err) {
+      console.error('Failed to persist live machine adjustments:', err);
+    } finally {
+      persistInFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      persistLiveMachineAdjustments();
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   // Get status for machine 0028
   const machine0028Status = machineStatus['0028'] || { online: false, last_count: 0 };
@@ -934,11 +1075,13 @@ const SavedMachines = () => {
 
               <div className="components-grid">
                 {selectedMachine.usageHours && Object.entries(selectedMachine.usageHours).map(([component, hours]) => {
-                  const prediction = selectedMachine.predictions?.[component] || 'No prediction';
-                  const formattedPrediction = formatPredictionWithHourMinute(prediction);
+                  const basePrediction = selectedMachine.predictions?.[component] || 'No prediction';
+                  const adjustedUsageHours = getAdjustedUsageHours(selectedMachine, hours);
+                  const adjustedPrediction = getAdjustedPredictionText(selectedMachine, basePrediction);
+                  const formattedPrediction = formatPredictionWithHourMinute(adjustedPrediction);
                   const isSelected = selectedComponent === component;
-                  const isCritical = prediction.includes('Maintenance Required');
-                  const hoursRemaining = extractRemainingHours(prediction);
+                  const isCritical = adjustedPrediction.includes('Maintenance Required');
+                  const hoursRemaining = extractRemainingHours(adjustedPrediction);
 
                   return (
                     <div
@@ -996,7 +1139,7 @@ const SavedMachines = () => {
                           <div className="component-details">
                             <div className="usage-info">
                               <span className="info-label">Used:</span>
-                              <span className="info-value">{formatHoursToHourMinute(hours)}</span>
+                              <span className="info-value">{formatHoursToHourMinute(adjustedUsageHours)}</span>
                             </div>
                             <div className="prediction-info">
                               <span className="info-label">Prediction:</span>

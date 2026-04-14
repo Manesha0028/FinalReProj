@@ -57,7 +57,9 @@ async def save_machine(
 
         # Preserve live-status fields if the machine already exists
         if existing:
-            machine_dict["workingTimeSeconds"] = int(existing.get("workingTimeSeconds", 0) or 0)
+            incoming_working_seconds = int(machine_dict.get("workingTimeSeconds", 0) or 0)
+            existing_working_seconds = int(existing.get("workingTimeSeconds", 0) or 0)
+            machine_dict["workingTimeSeconds"] = max(existing_working_seconds, incoming_working_seconds)
             machine_dict["currentStatus"] = existing.get("currentStatus", "offline")
             machine_dict["currentOnlineSince"] = existing.get("currentOnlineSince")
         else:
