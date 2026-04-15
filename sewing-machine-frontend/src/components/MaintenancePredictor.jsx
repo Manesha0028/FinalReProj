@@ -23,8 +23,8 @@ const MaintenancePredictor = () => {
 
   const [components, setComponents] = useState(COMPONENTS_LIST);
   const [machineId, setMachineId] = useState('');
-  const [fabricType, setFabricType] = useState('Medium');
-  const [manufacturingYear, setManufacturingYear] = useState(2020);
+  const [fabricType, setFabricType] = useState('');
+  const [manufacturingYear, setManufacturingYear] = useState('');
   const [usageHours, setUsageHours] = useState({});
   const [predictions, setPredictions] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -101,6 +101,16 @@ const MaintenancePredictor = () => {
   const validateInputs = () => {
     if (!machineId.trim()) {
       setError('Please enter Machine ID');
+      return false;
+    }
+
+    if (!fabricType) {
+      setError('Please select Fabric Type');
+      return false;
+    }
+
+    if (!manufacturingYear) {
+      setError('Please select Manufacturing Year');
       return false;
     }
     
@@ -189,7 +199,7 @@ const MaintenancePredictor = () => {
 
       const response = await api.post('/api/ml/predict', {
         Fabric_Type: fabricType,
-        M_Year: manufacturingYear,
+        M_Year: Number(manufacturingYear),
         usageDict: processedUsage
       });
       
@@ -248,9 +258,6 @@ const MaintenancePredictor = () => {
       const response = await api.post('/api/machines', machineData);
       
       if (response.status === 200 || response.status === 201) {
-        setSuccess('Machine saved successfully to database!');
-        setSaveSuccess(true);
-        
         // Refresh saved machines list
         fetchSavedMachines();
         
@@ -258,6 +265,10 @@ const MaintenancePredictor = () => {
         const localSaved = JSON.parse(localStorage.getItem('savedMachines') || '[]');
         const updatedLocal = [machineData, ...localSaved].slice(0, 50);
         localStorage.setItem('savedMachines', JSON.stringify(updatedLocal));
+
+        clearForm();
+        setShowPopup(false);
+        setSuccess('Machine saved successfully to database!');
         
         // Clear success message after 3 seconds
         setTimeout(() => {
@@ -283,9 +294,11 @@ const MaintenancePredictor = () => {
         const localSaved = JSON.parse(localStorage.getItem('savedMachines') || '[]');
         const updatedLocal = [machineData, ...localSaved].slice(0, 50);
         localStorage.setItem('savedMachines', JSON.stringify(updatedLocal));
-        
+        setSavedMachines(updatedLocal);
+
+        clearForm();
+        setShowPopup(false);
         setSuccess('Machine saved locally (database connection unavailable)');
-        setSaveSuccess(true);
         
         setTimeout(() => {
           setSuccess('');
@@ -300,8 +313,8 @@ const MaintenancePredictor = () => {
 
   const loadMachineFromHistory = (entry) => {
     setMachineId(entry.machineId);
-    setFabricType(entry.fabricType || 'Medium');
-    setManufacturingYear(entry.manufacturingYear || entry.year || 2020);
+    setFabricType(entry.fabricType || '');
+    setManufacturingYear(entry.manufacturingYear || entry.year || '');
     setUsageHours(entry.usageHours || entry.usage || {});
     if (entry.predictions) {
       setPredictions(entry.predictions);
@@ -312,8 +325,8 @@ const MaintenancePredictor = () => {
 
   const clearForm = () => {
     setMachineId('');
-    setFabricType('Medium');
-    setManufacturingYear(2020);
+    setFabricType('');
+    setManufacturingYear('');
     const resetUsage = {};
     const resetTouched = {};
     components.forEach(comp => {
@@ -325,6 +338,7 @@ const MaintenancePredictor = () => {
     setPredictions(null);
     setError('');
     setSuccess('');
+    setSaveSuccess(false);
   };
 
   const closePopup = () => {
@@ -384,16 +398,6 @@ const MaintenancePredictor = () => {
       <div className="predictor-header">
         <h2>🔧 JUKI Machine Maintenance Predictor</h2>
         <div className="header-buttons">
-          <button 
-            type="button"
-            className="history-btn"
-            onClick={() => setShowHistory(!showHistory)}
-          >
-            {showHistory ? 'Hide Machines' : 'Saved Machines'} 📋
-            {savedMachines.length > 0 && (
-              <span className="badge">{savedMachines.length}</span>
-            )}
-          </button>
           <button 
             type="button"
             className="clear-btn"
@@ -478,6 +482,7 @@ const MaintenancePredictor = () => {
                 value={fabricType} 
                 onChange={(e) => setFabricType(e.target.value)}
               >
+                <option value="">Select fabric type</option>
                 <option value="Medium">Medium</option>
                 <option value="Heavy">Heavy</option>
               </select>
@@ -485,14 +490,20 @@ const MaintenancePredictor = () => {
             
             <div className="form-group">
               <label>Manufacturing Year:</label>
-              <input
-                type="number"
+              <select
                 value={manufacturingYear}
-                onChange={(e) => setManufacturingYear(parseInt(e.target.value) || 2020)}
-                min="2000"
-                max="2024"
-                step="1"
-              />
+                onChange={(e) => setManufacturingYear(e.target.value)}
+              >
+                <option value="">Select manufacturing year</option>
+                {Array.from({ length: 2020 - 2006 + 1 }, (_, index) => {
+                  const year = 2020 - index;
+                  return (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  );
+                })}
+              </select>
             </div>
           </div>
         </div>
@@ -668,12 +679,6 @@ const MaintenancePredictor = () => {
                       disabled={saving || saveSuccess}
                     >
                       {saving ? '💾 Saving...' : saveSuccess ? '✅ Saved!' : '💾 Add Machine'}
-                    </button>
-                    <button 
-                      className="print-btn"
-                      onClick={() => window.print()}
-                    >
-                      🖨️ Print
                     </button>
                     <button 
                       className="close-btn"

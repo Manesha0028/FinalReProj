@@ -1,32 +1,14 @@
-import React, { useState } from 'react';
-import MaintenancePredictor from './MaintenancePredictor';
+import React from 'react';
 import './Dashboard.css';
 
 const Dashboard = ({ user, onLogout }) => {
-  const [activeTab, setActiveTab] = useState('dashboard');
 
   return (
     <div className="dashboard">
       {/* Remove the navbar from here - it's now in App.jsx */}
       
       <div className="dashboard-content">
-        <div className="dashboard-tabs">
-          <button 
-            className={`tab ${activeTab === 'dashboard' ? 'active' : ''}`}
-            onClick={() => setActiveTab('dashboard')}
-          >
-            📊 Overview
-          </button>
-          <button 
-            className={`tab ${activeTab === 'predictor' ? 'active' : ''}`}
-            onClick={() => setActiveTab('predictor')}
-          >
-            🔧 Maintenance Predictor
-          </button>
-        </div>
-
-        {activeTab === 'dashboard' && (
-          <div className="welcome-section">
+        <div className="welcome-section">
             <h1>Welcome, {user?.username}!</h1>
             <p>Role: <span className="role-highlight">{user?.role}</span></p>
             
@@ -52,12 +34,7 @@ const Dashboard = ({ user, onLogout }) => {
                 <p>No recent activity</p>
               </div>
             </div>
-          </div>
-        )}
-
-        {activeTab === 'predictor' && (
-          <MaintenancePredictor />
-        )}
+        </div>
       </div>
     </div>
   );

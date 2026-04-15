@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import SavedMachines from './components/SavedMachines';
+import MaintenancePredictor from './components/MaintenancePredictor';
 import { verifyAuth } from './services/api';
 import './App.css';
 
@@ -43,11 +44,6 @@ function App() {
     setCurrentPage('dashboard');
   };
 
-  // Debug logging
-  console.log('Current page:', currentPage);
-  console.log('Is authenticated:', isAuthenticated);
-  console.log('Loading:', loading);
-
   if (loading) {
     return <div className="loading">Loading application...</div>;
   }
@@ -58,24 +54,24 @@ function App() {
         <Login onLogin={handleLogin} />
       ) : (
         <>
-          <nav className="main-nav" style={{ border: '2px solid red' }}> {/* Temporary red border */}
+          <nav className="main-nav">
             <div className="nav-brand">Sewing Machine Management</div>
             <div className="nav-links">
               <button 
                 className={`nav-link ${currentPage === 'dashboard' ? 'active' : ''}`}
-                onClick={() => {
-                  console.log('Dashboard clicked');
-                  setCurrentPage('dashboard');
-                }}
+                onClick={() => setCurrentPage('dashboard')}
               >
                 📊 Dashboard
               </button>
               <button 
+                className={`nav-link ${currentPage === 'maintenance-predictor' ? 'active' : ''}`}
+                onClick={() => setCurrentPage('maintenance-predictor')}
+              >
+                🔧 Maintenance Predictor
+              </button>
+              <button 
                 className={`nav-link ${currentPage === 'saved-machines' ? 'active' : ''}`}
-                onClick={() => {
-                  console.log('Saved Machines clicked');
-                  setCurrentPage('saved-machines');
-                }}
+                onClick={() => setCurrentPage('saved-machines')}
               >
                 📋 Saved Machines
               </button>
@@ -89,9 +85,9 @@ function App() {
             </div>
           </nav>
 
-          <div style={{ padding: '1rem', border: '2px solid blue', marginTop: '1rem' }}> {/* Temporary blue border */}
-            <h3>Current Page: {currentPage}</h3>
+          <div style={{ padding: '1rem', marginTop: '1rem' }}>
             {currentPage === 'dashboard' && <Dashboard user={user} onLogout={handleLogout} />}
+            {currentPage === 'maintenance-predictor' && <MaintenancePredictor />}
             {currentPage === 'saved-machines' && <SavedMachines />}
           </div>
         </>
