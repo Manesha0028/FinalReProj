@@ -351,17 +351,23 @@ const SavedMachines = () => {
     }
 
     if (yearFilter !== 'all') {
-      const currentYear = new Date().getFullYear();
-      if (yearFilter === 'old') {
-        filtered = filtered.filter(machine => machine.manufacturingYear < currentYear - 5);
-      } else if (yearFilter === 'medium') {
-        filtered = filtered.filter(machine => {
-          const age = currentYear - machine.manufacturingYear;
-          return age >= 3 && age <= 5;
-        });
-      } else if (yearFilter === 'new') {
-        filtered = filtered.filter(machine => currentYear - machine.manufacturingYear < 3);
-      }
+      filtered = filtered.filter(machine => {
+        const machineYear = Number(machine.manufacturingYear);
+        if (Number.isNaN(machineYear)) return false;
+
+        if (yearFilter.startsWith('year-')) {
+          const selectedYear = Number(yearFilter.replace('year-', ''));
+          return machineYear === selectedYear;
+        }
+
+        if (yearFilter.startsWith('range-')) {
+          const [, range] = yearFilter.split('range-');
+          const [startYear, endYear] = range.split('-').map(Number);
+          return machineYear >= startYear && machineYear <= endYear;
+        }
+
+        return true;
+      });
     }
 
     filtered.sort((a, b) => {
@@ -586,9 +592,13 @@ const SavedMachines = () => {
 
   const yearRanges = [
     { value: 'all', label: 'All Years' },
-    { value: 'new', label: 'Less than 3 years' },
-    { value: 'medium', label: '3-5 years' },
-    { value: 'old', label: 'More than 5 years' }
+    { value: 'range-2006-2009', label: '2006 - 2009' },
+    { value: 'range-2010-2015', label: '2010 - 2015' },
+    { value: 'range-2016-2020', label: '2016 - 2020' },
+    ...Array.from({ length: 2020 - 2006 + 1 }, (_, index) => {
+      const year = 2006 + index;
+      return { value: `year-${year}`, label: `Year ${year}` };
+    })
   ];
 
   const formatTimestamp = (timestamp) => {
@@ -747,10 +757,6 @@ const SavedMachines = () => {
       <div className="saved-machines-header">
         <div>
           <h2>📋 Saved Machines</h2>
-          <div className="connection-indicator">
-            <span className={`status-dot ${wsConnected ? 'connected' : 'disconnected'}`}></span>
-            {wsConnected ? 'Real-time connected' : 'Connecting...'}
-          </div>
         </div>
         <div className="header-actions">
           <button 
