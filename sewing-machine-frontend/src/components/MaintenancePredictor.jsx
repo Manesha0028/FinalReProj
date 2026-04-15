@@ -512,31 +512,8 @@ const MaintenancePredictor = () => {
           <h3>⏱️ Component Usage Hours <span className="required">*</span></h3>
           <p className="section-note">Enter the number of hours each component has been used</p>
           
-          {/* First row of components */}
           <div className="usage-grid">
-            {components.slice(0, 5).map(component => (
-              <div key={component} className="usage-item">
-                <label>{component}:</label>
-                <input
-                  type="number"
-                  value={usageHours[component] || ''}
-                  onChange={(e) => handleUsageChange(component, e.target.value)}
-                  onBlur={() => handleBlur(component)}
-                  min="0"
-                  step="1"
-                  placeholder="Enter hours"
-                  className={isFieldInvalid(component) ? 'invalid' : ''}
-                />
-                {isFieldInvalid(component) && (
-                  <span className="field-error">Please enter a valid number</span>
-                )}
-              </div>
-            ))}
-          </div>
-          
-          {/* Second row of components */}
-          <div className="usage-grid">
-            {components.slice(5, 10).map(component => (
+            {components.map(component => (
               <div key={component} className="usage-item">
                 <label>{component}:</label>
                 <input

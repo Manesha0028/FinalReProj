@@ -194,9 +194,10 @@ select:invalid {
 
 .usage-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 1rem;
   margin: 1rem 0;
+  align-items: start;
 }
 
 .usage-item {
@@ -206,6 +207,7 @@ select:invalid {
   background: #f7fafc;
   border-radius: 5px;
   border: 1px solid #e2e8f0;
+  height: 100%;
 }
 
 .usage-item label {
