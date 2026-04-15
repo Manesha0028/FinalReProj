@@ -141,7 +141,6 @@ const MaintenancePredictor = () => {
     return true;
   };
 
-  // Simulate prediction progress with longer duration
   const simulatePredictionProgress = () => {
     const stages = [
       'Initializing prediction engine...',
@@ -152,28 +151,42 @@ const MaintenancePredictor = () => {
       'Generating maintenance recommendations...',
       'Finalizing predictions...'
     ];
-    
+
     let progress = 0;
-    let stageIndex = 0;
-    
-    const interval = setInterval(() => {
-      // Slower progression (3 seconds total instead of 2)
-      progress += Math.random() * 8;
-      if (progress > 100) progress = 100;
-      
-      setPredictionProgress(Math.min(100, Math.floor(progress)));
-      
-      if (progress > (stageIndex + 1) * 14.28 && stageIndex < stages.length - 1) {
-        stageIndex++;
+    let cancelled = false;
+    const totalSteps = 100;
+    const intervalMs = 75;
+
+    const promise = new Promise((resolve) => {
+      const interval = setInterval(() => {
+        if (cancelled) {
+          clearInterval(interval);
+          resolve();
+          return;
+        }
+
+        progress = Math.min(totalSteps, progress + 1);
+        setPredictionProgress(progress);
+
+        const stageIndex = Math.min(
+          stages.length - 1,
+          Math.floor(((progress - 1) / totalSteps) * stages.length)
+        );
         setPredictionStage(stages[stageIndex]);
+
+        if (progress >= totalSteps) {
+          clearInterval(interval);
+          resolve();
+        }
+      }, intervalMs);
+    });
+
+    return {
+      promise,
+      cancel: () => {
+        cancelled = true;
       }
-      
-      if (progress >= 100) {
-        clearInterval(interval);
-      }
-    }, 300); // Slower interval (300ms instead of 200ms)
-    
-    return interval;
+    };
   };
 
   const handleSubmit = async (e) => {
@@ -182,16 +195,14 @@ const MaintenancePredictor = () => {
     
     setLoading(true);
     setShowPopup(true);
-    setPredictionProgress(0);
+    setPredictionProgress(1);
     setPredictionStage('Initializing prediction engine...');
     setError('');
     setSaveSuccess(false);
 
-    // Start progress simulation with longer duration
-    const progressInterval = simulatePredictionProgress();
+    const progressController = simulatePredictionProgress();
 
     try {
-      // Convert strings to numbers
       const processedUsage = {};
       Object.keys(usageHours).forEach(key => {
         processedUsage[key] = Number(usageHours[key]) || 0;
@@ -202,12 +213,11 @@ const MaintenancePredictor = () => {
         M_Year: Number(manufacturingYear),
         usageDict: processedUsage
       });
-      
-      // Ensure progress reaches 100% before showing results
+
+      await progressController.promise;
       setPredictionProgress(100);
       setPredictionStage('Prediction complete!');
-      
-      // Longer delay to show 100% completion
+
       setTimeout(() => {
         const predictionData = {
           ...response.data.predictions,
@@ -219,14 +229,14 @@ const MaintenancePredictor = () => {
           usageHours: processedUsage,
           timestamp: new Date().toISOString()
         };
-        
+
         setPredictions(predictionData);
         setLoading(false);
-        // Keep popup open to show results
-      }, 800);
+      }, 600);
 
     } catch (err) {
-      clearInterval(progressInterval);
+      progressController.cancel();
+      setPredictionProgress(0);
       setError(err.response?.data?.detail || 'Prediction failed');
       setLoading(false);
       setShowPopup(false);
@@ -268,9 +278,8 @@ const MaintenancePredictor = () => {
 
         clearForm();
         setShowPopup(false);
-        setSuccess('Machine saved successfully to database!');
+        setSuccess('Machine Added Successfully');
         
-        // Clear success message after 3 seconds
         setTimeout(() => {
           setSuccess('');
         }, 3000);
@@ -298,7 +307,7 @@ const MaintenancePredictor = () => {
 
         clearForm();
         setShowPopup(false);
-        setSuccess('Machine saved locally (database connection unavailable)');
+        setSuccess('Machine Added Successfully');
         
         setTimeout(() => {
           setSuccess('');
@@ -396,20 +405,20 @@ const MaintenancePredictor = () => {
   return (
     <div className="predictor-container">
       <div className="predictor-header">
-        <h2>🔧 JUKI Machine Maintenance Predictor</h2>
+        <h2>JUKI Machine Maintenance Predictor</h2>
         <div className="header-buttons">
           <button 
             type="button"
             className="clear-btn"
             onClick={clearForm}
           >
-            Clear Form 🧹
+            Clear Form <span className="action-icon">🧹</span>
           </button>
         </div>
       </div>
       
       {error && <div className="error-message">{error}</div>}
-      {success && <div className="success-message">{success}</div>}
+      {success && <div className="success-message toast-notification">✅ {success}</div>}
       
       {showHistory && predictionHistory.length > 0 && (
         <div className="history-panel">
@@ -431,85 +440,85 @@ const MaintenancePredictor = () => {
       )}
       
       <form onSubmit={handleSubmit} className="predictor-form" noValidate>
-        <div className="form-section">
-          <h3>📋 Machine Information</h3>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Machine ID <span className="required">*</span>:</label>
-              <input
-                type="text"
-                value={machineId}
-                onChange={(e) => setMachineId(e.target.value)}
-                placeholder="e.g., SM-001"
-              />
+        <div className="form-section combined-section">
+          <h3><span className="section-icon">📋</span>Machine Information & Operating Parameters</h3>
+          <div className="top-form-sections">
+            <div className="compact-section inner-section">
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Machine ID <span className="required">*</span>:</label>
+                  <input
+                    type="text"
+                    value={machineId}
+                    onChange={(e) => setMachineId(e.target.value)}
+                    placeholder="e.g., SM-001"
+                  />
+                </div>
+                
+                <div className="form-group">
+                  <label>Brand Name:</label>
+                  <input
+                    type="text"
+                    value={FIXED_BRAND}
+                    className="fixed-input"
+                    readOnly
+                    disabled
+                  />
+                </div>
+              </div>
+              
+              <div className="form-row">
+                <div className="form-group form-group-full">
+                  <label>Machine Type:</label>
+                  <input
+                    type="text"
+                    value={FIXED_MACHINE_TYPE}
+                    className="fixed-input"
+                    readOnly
+                    disabled
+                  />
+                </div>
+              </div>
             </div>
-            
-            <div className="form-group">
-              <label>Brand Name:</label>
-              <input
-                type="text"
-                value={FIXED_BRAND}
-                className="fixed-input"
-                readOnly
-                disabled
-              />
-            </div>
-          </div>
-          
-          <div className="form-row">
-            <div className="form-group">
-              <label>Machine Type:</label>
-              <input
-                type="text"
-                value={FIXED_MACHINE_TYPE}
-                className="fixed-input"
-                readOnly
-                disabled
-              />
-            </div>
-            <div className="form-group">
-              {/* Empty div for spacing */}
-            </div>
-          </div>
-        </div>
 
-        <div className="form-section">
-          <h3>⚙️ Operating Parameters</h3>
-          <div className="form-row">
-            <div className="form-group">
-              <label>Fabric Type:</label>
-              <select 
-                value={fabricType} 
-                onChange={(e) => setFabricType(e.target.value)}
-              >
-                <option value="">Select fabric type</option>
-                <option value="Medium">Medium</option>
-                <option value="Heavy">Heavy</option>
-              </select>
-            </div>
-            
-            <div className="form-group">
-              <label>Manufacturing Year:</label>
-              <select
-                value={manufacturingYear}
-                onChange={(e) => setManufacturingYear(e.target.value)}
-              >
-                <option value="">Select manufacturing year</option>
-                {Array.from({ length: 2020 - 2006 + 1 }, (_, index) => {
-                  const year = 2020 - index;
-                  return (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  );
-                })}
-              </select>
+            <div className="compact-section inner-section">
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Fabric Type:</label>
+                  <select 
+                    value={fabricType} 
+                    onChange={(e) => setFabricType(e.target.value)}
+                  >
+                    <option value="">Select fabric type</option>
+                    <option value="Medium">Medium</option>
+                    <option value="Heavy">Heavy</option>
+                  </select>
+                </div>
+                
+                <div className="form-group">
+                  <label>Manufacturing Year:</label>
+                  <select
+                    value={manufacturingYear}
+                    onChange={(e) => setManufacturingYear(e.target.value)}
+                  >
+                    <option value="">Select manufacturing year</option>
+                    {Array.from({ length: 2020 - 2006 + 1 }, (_, index) => {
+                      const year = 2020 - index;
+                      return (
+                        <option key={year} value={year}>
+                          {year}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
             </div>
           </div>
         </div>
         
         <div className="form-section">
-          <h3>⏱️ Component Usage Hours <span className="required">*</span></h3>
+          <h3><span className="section-icon">⏱️</span>Component Usage Hours <span className="required">*</span></h3>
           <p className="section-note">Enter the number of hours each component has been used</p>
           
           <div className="usage-grid">
@@ -539,7 +548,7 @@ const MaintenancePredictor = () => {
           disabled={loading} 
           className={`predict-btn ${loading ? 'loading' : ''}`}
         >
-          {loading ? '🔮 Predicting RUL...' : '🔮 Predict Maintenance'}
+          {loading ? 'Running Maintenance Prediction...' : 'Run Maintenance Prediction'}
         </button>
       </form>
 
