@@ -31,10 +31,7 @@ const SavedMachines = () => {
   const [loadingHistory, setLoadingHistory] = useState(false);
   
   const wsRef = useRef(null);
-  const persistInFlightRef = useRef(false);
-  const machinesRef = useRef([]);
   const machineStatusRef = useRef({});
-  const selectedMachineRef = useRef(null);
   const [statusUpdateTrigger, setStatusUpdateTrigger] = useState(0);
 
   // Returns base seconds safely as a non-negative integer
@@ -59,6 +56,35 @@ const SavedMachines = () => {
     return base + Math.max(0, Math.floor((lastSeen - sessionStart) / 1000));
   };
 
+  const mergeLiveStatus = (prevStatus = {}, data = {}, forceOnline = false) => {
+    const nowMs = Date.now();
+    const isOnline = forceOnline || data.online === true;
+    const prevBaseSeconds = toSafeSeconds(prevStatus.base_seconds ?? 0);
+    const incomingBaseSeconds = toSafeSeconds(data.working_time_seconds ?? prevBaseSeconds);
+    const incomingLastSeenMs = data.last_seen
+      ? new Date(data.last_seen).getTime()
+      : (data.timestamp ? new Date(data.timestamp).getTime() : (isOnline ? nowMs : prevStatus.last_seen_ms ?? null));
+
+    const hadActiveSession = Boolean(
+      prevStatus.session_start_ms &&
+      prevStatus.last_seen_ms &&
+      (nowMs - prevStatus.last_seen_ms) <= 5000
+    );
+
+    const baseAdvanced = incomingBaseSeconds > prevBaseSeconds;
+
+    return {
+      ...prevStatus,
+      base_seconds: baseAdvanced ? incomingBaseSeconds : prevBaseSeconds,
+      session_start_ms: isOnline
+        ? (hadActiveSession && !baseAdvanced ? prevStatus.session_start_ms : (incomingLastSeenMs || nowMs))
+        : null,
+      last_seen_ms: incomingLastSeenMs ?? prevStatus.last_seen_ms ?? null,
+      last_count: data.last_count ?? data.count ?? prevStatus.last_count,
+      rssi: data.rssi ?? prevStatus.rssi,
+    };
+  };
+
   useEffect(() => {
     fetchSavedMachines();
     connectWebSocket();
@@ -75,16 +101,8 @@ const SavedMachines = () => {
   }, [machines, searchTerm, sortConfig, fabricFilter, yearFilter, statusUpdateTrigger]);
 
   useEffect(() => {
-    machinesRef.current = machines;
-  }, [machines]);
-
-  useEffect(() => {
     machineStatusRef.current = machineStatus;
   }, [machineStatus]);
-
-  useEffect(() => {
-    selectedMachineRef.current = selectedMachine;
-  }, [selectedMachine]);
 
   // Periodic status update to check online/offline based on time
   useEffect(() => {
@@ -97,7 +115,9 @@ const SavedMachines = () => {
 
   const connectWebSocket = () => {
     try {
-      const ws = new WebSocket('ws://localhost:8000/ws/counter');
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsHost = window.location.hostname || 'localhost';
+      const ws = new WebSocket(`${wsProtocol}://${wsHost}:8000/ws/counter`);
       wsRef.current = ws;
       
       ws.onopen = () => {
@@ -113,32 +133,10 @@ const SavedMachines = () => {
           // Handle different message types
           if (data.type === 'machine_status') {
             console.log(`🤖 Machine ${data.machine_id} status: online=${data.online} wt=${data.working_time_seconds}`);
-            setMachineStatus(prev => {
-              const prevStatus = prev[data.machine_id] || {};
-              const isOnline = data.online === true;
-              const nowMs = Date.now();
-              const previousCurrentSeconds = calculateCurrentFromSnapshot(prevStatus, nowMs);
-              const incomingBaseSeconds = toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0);
-              // Only set last_seen_ms if machine is actually online and we have a timestamp
-              const incomingLastSeenMs = (isOnline && data.last_seen)
-                ? new Date(data.last_seen).getTime()
-                : (isOnline ? (prevStatus.last_seen_ms || nowMs) : null);
-              // Never move timer backward when a snapshot arrives.
-              const normalizedBaseSeconds = Math.max(incomingBaseSeconds, previousCurrentSeconds);
-              const incomingSessionStartMs = isOnline
-                ? (incomingLastSeenMs || nowMs)
-                : null;
-              return {
-                ...prev,
-                [data.machine_id]: {
-                  ...prevStatus,
-                  base_seconds: normalizedBaseSeconds,
-                  session_start_ms: incomingSessionStartMs,
-                  last_seen_ms: incomingLastSeenMs,
-                  last_count: data.last_count ?? prevStatus.last_count,
-                }
-              };
-            });
+            setMachineStatus(prev => ({
+              ...prev,
+              [data.machine_id]: mergeLiveStatus(prev[data.machine_id] || {}, data)
+            }));
           }
           else if (data.type === 'heartbeat' || data.type === 'heartbeat_ack') {
             // Heartbeat only updates signal strength – never changes online/time state
@@ -152,30 +150,10 @@ const SavedMachines = () => {
           }
           else if (data.type === 'count_update') {
             console.log(`🔢 Count update for ${data.machine_id}: ${data.count} wt=${data.working_time_seconds}`);
-            setMachineStatus(prev => {
-              const prevStatus = prev[data.machine_id] || {};
-              const nowMs = Date.now();
-              const previousCurrentSeconds = calculateCurrentFromSnapshot(prevStatus, nowMs);
-              const incomingBaseSeconds = toSafeSeconds(data.working_time_seconds ?? prevStatus.base_seconds ?? 0);
-              // Trust the count timestamp from server; fall back to now
-              const newLastSeenMs = data.last_seen
-                ? new Date(data.last_seen).getTime()
-                : (data.timestamp ? new Date(data.timestamp).getTime() : nowMs);
-              // Never allow baseline to drop below current locally calculated runtime.
-              const normalizedBaseSeconds = Math.max(incomingBaseSeconds, previousCurrentSeconds);
-              // Reset session start to this snapshot time so base_seconds acts as true baseline.
-              const newSessionStartMs = newLastSeenMs;
-              return {
-                ...prev,
-                [data.machine_id]: {
-                  ...prevStatus,
-                  base_seconds: normalizedBaseSeconds,
-                  session_start_ms: newSessionStartMs,
-                  last_seen_ms: newLastSeenMs,
-                  last_count: data.count,
-                }
-              };
-            });
+            setMachineStatus(prev => ({
+              ...prev,
+              [data.machine_id]: mergeLiveStatus(prev[data.machine_id] || {}, data, true)
+            }));
             
             // Add to history
             setCounterHistory(prev => {
@@ -668,86 +646,6 @@ const SavedMachines = () => {
     });
   };
 
-  const getLiveAdjustedMachine = (machine) => {
-    if (!machine || !machine.machineId || !machine.usageHours) return null;
-
-    const currentWorkingSeconds = getCurrentWorkingSeconds(machine);
-    const baseWorkingSeconds = toSafeSeconds(machine.workingTimeSeconds || 0);
-
-    if (currentWorkingSeconds <= baseWorkingSeconds) {
-      return null;
-    }
-
-    const adjustedUsageHours = {};
-    Object.entries(machine.usageHours).forEach(([component, hours]) => {
-      adjustedUsageHours[component] = getAdjustedUsageHours(machine, hours);
-    });
-
-    const adjustedPredictions = { ...(machine.predictions || {}) };
-    Object.keys(adjustedUsageHours).forEach((component) => {
-      const currentPrediction = machine.predictions?.[component];
-      if (typeof currentPrediction === 'string') {
-        adjustedPredictions[component] = getAdjustedPredictionText(machine, currentPrediction);
-      }
-    });
-
-    return {
-      ...machine,
-      usageHours: adjustedUsageHours,
-      predictions: adjustedPredictions,
-      workingTimeSeconds: currentWorkingSeconds,
-      lastPrediction: new Date().toISOString(),
-    };
-  };
-
-  const persistLiveMachineAdjustments = async () => {
-    if (persistInFlightRef.current) return;
-
-    const currentMachines = machinesRef.current;
-    const onlineMachines = currentMachines.filter((machine) => isMachineOnline(machine.machineId));
-    if (onlineMachines.length === 0) return;
-
-    const updatedMachines = onlineMachines
-      .map((machine) => getLiveAdjustedMachine(machine))
-      .filter((machine) => machine !== null);
-
-    if (updatedMachines.length === 0) return;
-
-    persistInFlightRef.current = true;
-    try {
-      await Promise.all(updatedMachines.map((machine) => api.post('/api/machines', machine)));
-
-      setMachines((prev) => prev.map((machine) => {
-        const updated = updatedMachines.find((m) => m.machineId === machine.machineId);
-        return updated || machine;
-      }));
-
-      setSelectedMachine((prev) => {
-        if (!prev) return prev;
-        const updated = updatedMachines.find((m) => m.machineId === prev.machineId);
-        return updated || prev;
-      });
-
-      const localSaved = JSON.parse(localStorage.getItem('savedMachines') || '[]');
-      const updatedLocal = localSaved.map((machine) => {
-        const updated = updatedMachines.find((m) => m.machineId === machine.machineId);
-        return updated || machine;
-      });
-      localStorage.setItem('savedMachines', JSON.stringify(updatedLocal));
-    } catch (err) {
-      console.error('Failed to persist live machine adjustments:', err);
-    } finally {
-      persistInFlightRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      persistLiveMachineAdjustments();
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, []);
 
   // Get status for machine 0028
   const machine0028Status = machineStatus['0028'] || { online: false, last_count: 0 };

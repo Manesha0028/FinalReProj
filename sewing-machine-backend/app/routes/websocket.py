@@ -6,6 +6,7 @@ from app.config.database import get_database
 import json
 import logging
 import asyncio
+from time import monotonic
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ device_status = {}
 
 # Count-based online window used by UI/logic.
 ONLINE_TIMEOUT_SECONDS = 5
+COUNT_PERSIST_INTERVAL_SECONDS = 0.25
+COUNT_PERSIST_STEP = 3
 
 # Store connected WebSocket clients
 connected_clients: Dict[str, WebSocket] = {}
@@ -101,47 +104,98 @@ def build_machine_status(machine_id: str, fallback_last_count: int = 0) -> dict:
     }
 
 
-def mark_machine_online(machine_id: str, device_id: Optional[str], count_value: Optional[int] = None, rssi: Optional[int] = None) -> dict:
-    """Mark machine online and ensure running-time baseline is persisted."""
+def mark_machine_online(machine_id: str, device_id: Optional[str], count_value: Optional[int] = None, rssi: Optional[int] = None, persist_db: bool = True) -> dict:
+    """Mark machine online and keep websocket state fast even when DB writes are throttled."""
     now = datetime.now()
     now_iso = now.isoformat()
-    db = get_database()
-    machines_collection = db["machines"]
+    cached_state = device_status.get(machine_id, {})
 
-    machine = machines_collection.find_one({"machineId": machine_id})
-    if machine:
-        machine = persist_offline_if_inactive(machine_id, machine) or machine
+    if persist_db:
+        db = get_database()
+        machines_collection = db["machines"]
 
-    if machine:
-        update_fields = {
-            "currentStatus": "online",
-            "lastSeenAt": now_iso,
-            "updatedAt": now_iso,
+        machine = machines_collection.find_one({"machineId": machine_id})
+        if machine:
+            machine = persist_offline_if_inactive(machine_id, machine) or machine
+
+        if machine:
+            update_fields = {
+                "currentStatus": "online",
+                "lastSeenAt": now_iso,
+                "updatedAt": now_iso,
+            }
+
+            if machine.get("currentStatus") != "online" or not machine.get("currentOnlineSince"):
+                update_fields["currentOnlineSince"] = now_iso
+
+            if count_value is not None:
+                update_fields["last_count"] = int(count_value)
+
+            machines_collection.update_one({"machineId": machine_id}, {"$set": update_fields})
+
+        status_snapshot = build_machine_status(machine_id, fallback_last_count=int(count_value or 0))
+    else:
+        status_snapshot = {
+            "machine_id": machine_id,
+            "current_status": "online",
+            "online": True,
+            "online_since": cached_state.get("online_since") or now_iso,
+            "working_time_seconds": int(cached_state.get("working_time_seconds", 0) or 0),
+            "last_count": int(count_value if count_value is not None else cached_state.get("last_count", 0) or 0),
+            "last_seen": now_iso,
         }
 
-        # Start a new online session only if previously offline or without a valid session start.
-        if machine.get("currentStatus") != "online" or not machine.get("currentOnlineSince"):
-            update_fields["currentOnlineSince"] = now_iso
-
-        if count_value is not None:
-            update_fields["last_count"] = int(count_value)
-
-        machines_collection.update_one({"machineId": machine_id}, {"$set": update_fields})
-
-    status_snapshot = build_machine_status(machine_id, fallback_last_count=int(count_value or 0))
-
-    # Keep in-memory snapshot for quick websocket broadcasting.
     device_status[machine_id] = {
+        **cached_state,
         "online": True,
-        "last_seen": now_iso,
+        "last_seen": status_snapshot.get("last_seen") or now_iso,
         "device_id": device_id,
         "last_count": status_snapshot["last_count"],
-        "rssi": rssi,
+        "rssi": rssi if rssi is not None else cached_state.get("rssi"),
         "online_since": status_snapshot["online_since"],
         "working_time_seconds": status_snapshot["working_time_seconds"],
     }
 
     return status_snapshot
+
+
+def should_persist_count(machine_id: str, count_value: int) -> bool:
+    state = device_status.setdefault(machine_id, {})
+    now = monotonic()
+    last_persisted_at = float(state.get("last_persisted_at", 0.0) or 0.0)
+    raw_last_persisted_count = state.get("last_persisted_count")
+    last_persisted_count = int(raw_last_persisted_count) if raw_last_persisted_count is not None else -1
+
+    should_persist = (
+        last_persisted_count < 0
+        or abs(int(count_value) - last_persisted_count) >= COUNT_PERSIST_STEP
+        or (now - last_persisted_at) >= COUNT_PERSIST_INTERVAL_SECONDS
+    )
+
+    if should_persist:
+        state["last_persisted_at"] = now
+        state["last_persisted_count"] = int(count_value)
+
+    return should_persist
+
+
+def persist_count_update_sync(machine_id: str, device_id: Optional[str], count_value: int) -> None:
+    db = get_database()
+    counter_collection = db["counter_readings"]
+    counter_collection.insert_one({
+        "count": int(count_value),
+        "timestamp": datetime.now(),
+        "machine_id": machine_id,
+        "device_id": device_id,
+    })
+    mark_machine_online(machine_id, device_id, count_value=int(count_value), persist_db=True)
+
+
+async def persist_count_update_async(machine_id: str, device_id: Optional[str], count_value: int) -> None:
+    try:
+        await asyncio.to_thread(persist_count_update_sync, machine_id, device_id, int(count_value))
+    except Exception as e:
+        logger.error(f"Failed to persist count for {machine_id}: {e}")
 
 
 def mark_machine_offline(machine_id: str) -> dict:
@@ -231,7 +285,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 # Set a timeout to receive messages (60 seconds)
                 data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
-                logger.info(f"📩 Received: {data}")
+                logger.debug(f"📩 Received: {data}")
                 
                 try:
                     message = json.loads(data)
@@ -282,31 +336,26 @@ async def websocket_endpoint(websocket: WebSocket):
                         device_id = message.get("device_id")
                         machine_id = message.get("machine_id")
                         count_value = message.get("count")
-                        
+
                         if count_value is not None:
                             is_device_connection = True
-                            logger.info(f"📊 Count from {machine_id}: {count_value}")
-                            
-                            # Save to database
-                            db = get_database()
-                            counter_collection = db["counter_readings"]
-                            counter_data = {
-                                "count": count_value,
-                                "timestamp": datetime.now(),
-                                "machine_id": machine_id,
-                                "device_id": device_id
-                            }
-                            result = counter_collection.insert_one(counter_data)
-                            
-                            status_snapshot = mark_machine_online(machine_id, device_id, count_value=count_value)
-                            
-                            # Broadcast update to all connected clients
+                            count_value = int(count_value)
+                            logger.debug(f"📊 Count from {machine_id}: {count_value}")
+
+                            # Update websocket clients immediately without waiting on MongoDB.
+                            status_snapshot = mark_machine_online(
+                                machine_id,
+                                device_id,
+                                count_value=count_value,
+                                persist_db=False,
+                            )
+
                             update_message = {
                                 "type": "count_update",
                                 "machine_id": machine_id,
                                 "count": count_value,
                                 "timestamp": datetime.now().isoformat(),
-                                "db_id": str(result.inserted_id),
+                                "db_id": None,
                                 "status": status_snapshot["current_status"],
                                 "online": status_snapshot["online"],
                                 "online_since": status_snapshot["online_since"],
@@ -314,13 +363,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "last_seen": status_snapshot["last_seen"],
                             }
                             await broadcast_update(update_message)
-                            
-                            # Send confirmation to sender
+
+                            # Persist snapshots in the background at a controlled rate.
+                            if should_persist_count(machine_id, count_value):
+                                asyncio.create_task(persist_count_update_async(machine_id, device_id, count_value))
+
                             await websocket.send_text(json.dumps({
-                                "type": "count_update",
+                                "type": "count_ack",
+                                "machine_id": machine_id,
                                 "count": count_value,
-                                "status": "saved",
-                                "db_id": str(result.inserted_id)
                             }))
                             
                     elif msg_type == "heartbeat":
@@ -331,7 +382,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         is_device_connection = True
                         
-                        logger.info(f"💓 Heartbeat from {machine_id}, count: {count_value}")
+                        logger.debug(f"💓 Heartbeat from {machine_id}, count: {count_value}")
 
                         # Heartbeat should not change machine online/offline state.
                         # Machine is considered online only when a new count update arrives.
@@ -342,11 +393,14 @@ async def websocket_endpoint(websocket: WebSocket):
                             **existing_state,
                             "device_id": device_id,
                             "rssi": rssi,
-                            "last_count": status_snapshot["last_count"],
+                            "last_count": int(count_value or status_snapshot["last_count"] or 0),
                             "online": status_snapshot["online"],
                             "online_since": status_snapshot["online_since"],
                             "working_time_seconds": status_snapshot["working_time_seconds"],
                         }
+
+                        if count_value is not None and should_persist_count(machine_id, int(count_value)):
+                            asyncio.create_task(persist_count_update_async(machine_id, device_id, int(count_value)))
                         
                         # Broadcast heartbeat to all connected clients
                         heartbeat_message = {
