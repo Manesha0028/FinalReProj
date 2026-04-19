@@ -958,6 +958,10 @@ const SavedMachines = () => {
                   </span>
                 </div>
                 <div className="detail-item">
+                  <label>Live Count:</label>
+                  <span>{machineStatus[selectedMachine.machineId]?.last_count ?? selectedMachine.last_count ?? 0}</span>
+                </div>
+                <div className="detail-item">
                   <label>Machine Working Time:</label>
                   <span>{formatSecondsToHms(getCurrentWorkingSeconds(selectedMachine))}</span>
                 </div>
