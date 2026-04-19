@@ -75,12 +75,7 @@ const Login = ({ onLogin }) => {
           </button>
         </form>
 
-        <div className="demo-credentials">
-          <p><strong>Demo Credentials:</strong></p>
-          <p>Admin: username: admin, password: admin123</p>
-          <p>Manager: Create your own or contact admin</p>
-          <p>Supervisor: Create your own or contact admin</p>
-        </div>
+
       </div>
     </div>
   );
