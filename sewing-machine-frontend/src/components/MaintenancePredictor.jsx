@@ -490,8 +490,8 @@ const MaintenancePredictor = () => {
                     onChange={(e) => setFabricType(e.target.value)}
                   >
                     <option value="">Select fabric type</option>
-                    <option value="Medium">Medium</option>
-                    <option value="Heavy">Heavy</option>
+                    <option value="Medium">Medium - GSM 150</option>
+                    <option value="Heavy">Heavy - GSM 280</option>
                   </select>
                 </div>
                 
